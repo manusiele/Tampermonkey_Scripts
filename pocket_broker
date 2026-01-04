@@ -1,0 +1,196 @@
+// ==UserScript==
+// @name         PocketOption Demo Trading Bot (Multi-Strategy)
+// @namespace    http://tampermonkey.net/
+// @version      0.4
+// @description  A bot for PocketOption DEMO with multiple basic strategies to test. USE AT YOUR OWN RISK.
+// @author       You
+// @match        https://pocketoption.com/en/cabinet/demo-quick-high-low/
+// @grant        none
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // --- CONFIGURATION ---
+    const CHECK_INTERVAL_MS = 3000; // How often to check the price (in milliseconds)
+    const TRADE_AMOUNT = 1;         // The amount to trade for each order
+
+    // --- STRATEGY SELECTION ---
+    // Change this value to test different strategies.
+    // Options: 'SMA_CROSS', 'RSI_MEAN_REVERSION', 'MACD_CROSS'
+    const STRATEGY = 'SMA_CROSS';
+
+    // Strategy-specific parameters
+    const SMA_SHORT_PERIOD = 10;
+    const SMA_LONG_PERIOD = 30;
+    const RSI_PERIOD = 14;
+    const RSI_OVERSOLD_LEVEL = 30;
+    const RSI_OVERBOUGHT_LEVEL = 70;
+    const MACD_FAST_PERIOD = 12;
+    const MACD_SLOW_PERIOD = 26;
+    const MACD_SIGNAL_PERIOD = 9;
+
+    const PRICE_HISTORY_LENGTH = SMA_LONG_PERIOD + 20; // Keep enough history for all calculations
+
+    // --- UTILITY FUNCTIONS ---
+
+    /**
+     * Calculates a Simple Moving Average (SMA).
+     */
+    function calculateSMA(data, period) {
+        if (data.length < period) return null;
+        const slice = data.slice(-period);
+        const sum = slice.reduce((acc, val) => acc + val, 0);
+        return sum / period;
+    }
+
+    /**
+     * Calculates an Exponential Moving Average (EMA).
+     */
+    function calculateEMA(data, period) {
+        if (data.length < period) return null;
+        const multiplier = 2 / (period + 1);
+        // Start with SMA for the first EMA value
+        let ema = data.slice(0, period).reduce((a, b) => a + b) / period;
+        for (let i = period; i < data.length; i++) {
+            ema = (data[i] * multiplier) + (ema * (1 - multiplier));
+        }
+        return ema;
+    }
+    
+    /**
+     * Calculates the Relative Strength Index (RSI).
+     */
+    function calculateRSI(data, period) {
+        if (data.length < period + 1) return null;
+        let gains = 0, losses = 0;
+        for (let i = data.length - period; i < data.length - 1; i++) {
+            const change = data[i + 1] - data[i];
+            if (change >= 0) gains += change;
+            else losses -= change;
+        }
+        const avgGain = gains / period;
+        const avgLoss = losses / period;
+        if (avgLoss === 0) return 100; // Handle division by zero
+        const rs = avgGain / avgLoss;
+        return 100 - (100 / (1 + rs));
+    }
+
+    /**
+     * Calculates MACD, Signal, and Histogram values.
+     */
+    function calculateMACD(data, fast, slow, signal) {
+        const emaFast = calculateEMA(data, fast);
+        const emaSlow = calculateEMA(data, slow);
+        if (emaFast === null || emaSlow === null) return { macd: null, signal: null, histogram: null };
+
+        const macdLine = emaFast - emaSlow;
+        
+        // To get the signal line, we need the history of MACD values. This is a simplified version.
+        const macdHistory = [];
+        for (let i = slow - 1; i < data.length; i++) {
+            const emaF = calculateEMA(data.slice(0, i + 1), fast);
+            const emaS = calculateEMA(data.slice(0, i + 1), slow);
+            if (emaF !== null && emaS !== null) {
+                macdHistory.push(emaF - emaS);
+            }
+        }
+        const signalLine = calculateSMA(macdHistory, signal);
+        if (signalLine === null) return { macd: macdLine, signal: null, histogram: null };
+
+        return { macd: macdLine, signal: signalLine, histogram: macdLine - signalLine };
+    }
+
+
+    // --- TRADING STRATEGIES ---
+
+    function strategy_SMA_Cross(priceData) {
+        const shortMA = calculateSMA(priceData, SMA_SHORT_PERIOD);
+        const longMA = calculateSMA(priceData, SMA_LONG_PERIOD);
+        if (shortMA === null || longMA === null) return 'HOLD';
+        console.log(`SMA Cross -> Short: ${shortMA.toFixed(5)}, Long: ${longMA.toFixed(5)}`);
+        return (shortMA > longMA) ? 'UP' : 'DOWN';
+    }
+
+    function strategy_RSI_MeanReversion(priceData) {
+        const rsi = calculateRSI(priceData, RSI_PERIOD);
+        if (rsi === null) return 'HOLD';
+        console.log(`RSI Mean Reversion -> RSI: \${rsi.toFixed(2)}`);
+        if (rsi < RSI_OVERSOLD_LEVEL) return 'UP';  // Asset is potentially oversold, expect a bounce
+        if (rsi > RSI_OVERBOUGHT_LEVEL) return 'DOWN'; // Asset is potentially overbought, expect a drop
+        return 'HOLD';
+    }
+    
+    function strategy_MACD_Cross(priceData) {
+        const macdData = calculateMACD(priceData, MACD_FAST_PERIOD, MACD_SLOW_PERIOD, MACD_SIGNAL_PERIOD);
+        if (macdData.signal === null) return 'HOLD';
+        console.log(`MACD Cross -> MACD: ${macdData.macd.toFixed(5)}, Signal: ${macdData.signal.toFixed(5)}`);
+        return (macdData.macd > macdData.signal) ? 'UP' : 'DOWN';
+    }
+
+
+    // --- FUNCTIONS TO INTERACT WITH THE WEBPAGE (FRAGILE!) ---
+    function getCurrentPrice() {
+        const priceElement = document.querySelector('.trade-panel__price-info-value');
+        if (!priceElement) { console.error('Price element not found!'); return null; }
+        return parseFloat(priceElement.innerText.replace(/,/g, ''));
+    }
+
+    function placeUpTrade() {
+        console.log(`%c>>> PLACING UP TRADE FOR $${TRADE_AMOUNT} <<<__PROTECTED_7__%c>>> PLACING DOWN TRADE FOR $${TRADE_AMOUNT} <<<`, 'color: red; font-weight: bold; font-size: 16px;');
+        /*
+        // --- ACTUAL TRADING LOGIC (UNCOMMENT TO ENABLE) ---
+        const dealButton = document.querySelector('.deals-controls__button--down');
+        const amountInput = document.querySelector('input.deals-controls__input');
+        if (!dealButton || !amountInput) { console.error('Could not find DOWN deal button or amount input.'); return; }
+        amountInput.value = TRADE_AMOUNT;
+        amountInput.dispatchEvent(new Event('input', { bubbles: true }));
+        setTimeout(() => dealButton.click(), 500);
+        */
+    }
+
+    // --- THE MAIN BOT LOOP ---
+    let priceHistory = [];
+    let lastAction = 'HOLD';
+
+    console.log(`PocketOption Bot started. Using strategy: \${STRATEGY}. Waiting for price data...`);
+
+    const mainLoop = setInterval(() => {
+        const currentPrice = getCurrentPrice();
+        if (currentPrice === null) return;
+
+        priceHistory.push(currentPrice);
+        console.log(`--- New Price: \${currentPrice} ---`);
+
+        if (priceHistory.length > PRICE_HISTORY_LENGTH) priceHistory.shift();
+
+        let action = 'HOLD';
+        // Use the correct variable 'priceHistory' here
+        if (STRATEGY === 'SMA_CROSS') {
+            action = strategy_SMA_Cross(priceHistory);
+        } else if (STRATEGY === 'RSI_MEAN_REVERSION') {
+            action = strategy_RSI_MeanReversion(priceHistory);
+        } else if (        } else if (STRATEGY === 'MACD_CROSS') {
+            action = strategy_MACD_Cross(priceHistory);
+        } else {
+            console.error(`Unknown strategy selected: ${STRATEGY}. Bot will hold.`);
+        }
+
+        // Only place a trade if the signal is new and not a 'HOLD'
+        if (action !== 'HOLD' && action !== lastAction) {
+            console.log(`Strategy signal changed from ${lastAction} to ${action}.`);
+            if (action === 'UP') {
+                placeUpTrade();
+            } else if (action === 'DOWN') {
+                placeDownTrade();
+            }
+            lastAction = action; // Update the last action to prevent re-trading
+        } else {
+            console.log(`Strategy signal: ${action}. No action taken.`);
+        }
+
+        console.log('-----------------------------');
+
+    }, CHECK_INTERVAL_MS);
+
+})();
